@@ -9,6 +9,18 @@ class LoadFromFile(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         parser.parse_args(open(values).read().split(), namespace)
 
+def nc_parser(arg):
+
+    seqs = arg.split(",")
+    vals = []
+    for seq in seqs:
+        if ":" in seq:
+            vals += list(range(*[int(i) for i in seq.split(":")]))
+        else:
+            vals += [int(seq)]
+
+    return vals
+
 def climpca():
 
     parser = argparse.ArgumentParser()
@@ -27,10 +39,8 @@ def climpca():
                                      "in the same order as data-names and mask-names")
     parser.add_argument('--batch-size', type=int, default=None, help="Batch size")
     parser.add_argument('--n-iter', type=int, default=50, help="Number of iterations")
-    parser.add_argument('--n-components', type=int, default=100, help="Number of components")
+    parser.add_argument('--n-components', type=nc_parser, default="100", help="Number of components (number or sequences)")
     parser.add_argument('--initial-guess', type=float, default=None, help="Initial guess for missing data")
-    parser.add_argument('--optimize-to-ncmax', type=int, default=None, help="Search optimal number of components "
-                                                                     "by varying until ncmax")
     parser.add_argument('--output-dir', type=str, default='outputs/',
                                 help="Directory where the output files will be stored")
     parser.add_argument('--output-name', type=str, default='output',
@@ -47,39 +57,41 @@ def climpca():
 
     ds = xr.open_dataset(args.data_root_dir + "/test/" + args.test_data_name)
     data_test = cp.asarray(ds[args.data_type].values)
-    shape = data_test.shape
-    data_test = data_test.reshape(shape[0],-1)
+    orig_shape = data_test.shape
+    data_test = data_test.reshape(orig_shape[0],-1)
 
     if args.batch_size is None:
-        nt = shape[0]
+        nt = orig_shape[0]
     else:
         nt = args.batch_size
-    ns = shape[1] * shape[2]
+    ns = orig_shape[1] * orig_shape[2]
 
     assert ns == len(data_train[1]), "Inconsistent train/test data: {}, {}".format(ns, len(data_train[1]))
 
-    nc = shape[0] // nt
-    assert nc * nt == shape[0], "The total number of timesteps must be a multiple of the number of chunks"
+    nchunk = orig_shape[0] // nt
+    assert nchunk * nt == orig_shape[0], "The total number of timesteps must be a multiple of the number of chunks"
 
+    flat_shape = data_test.shape
     print("* Shape of train data:", data_train.shape)
-    print("* Shape of test data:", data_test.shape)
+    print("* Shape of test data:", flat_shape)
     print("* Batch size:", nt)
-    print("* Number of chunks:", nc)
+    print("* Number of chunks:", nchunk)
+    print("* Number of components:", args.n_components)
 
-    idx = [cp.s_[i * nt:( i + 1 ) * nt] for i in range(nc)]
+    idx = [cp.s_[i * nt:( i + 1 ) * nt] for i in range(nchunk)]
 
     mask = []
     if args.mask_name is None:
-        for it in range(nc):
+        for it in range(nchunk):
             mask.append(cp.isnan(data_test[idx[it]]))
     else:
-        mask_val = cp.asarray(xr.open_dataset(args.mask_dir + "/" + args.mask_names)[args.data_type].values)
-        assert mask_val.shape == shape
-        mask_val = mask_val.reshape(shape[0],-1)
-        for it in range(nc):
-            mask.append(cp.argwhere(mask_val[idx[it]] == 0))
+        mask_val = cp.asarray(xr.open_dataset(args.mask_dir + "/" + args.mask_name)[args.data_type].values)
+        assert mask_val.shape == orig_shape
+        mask_val = mask_val.reshape(orig_shape[0],-1)
+        for it in range(nchunk):
+            mask.append(mask_val[idx[it]] == 0)
 
-    # print("* Shape of mask:", *[mask[it].shape for it in range(nc)])
+    print("* Shape of mask:", *[mask[it].shape for it in range(nchunk)])
 
     if args.initial_guess is None:
         data_mean = cp.expand_dims(cp.nanmean(data_train, axis=0), axis=0)
@@ -90,28 +102,27 @@ def climpca():
 
     print("* Shape of data mean:", data_mean.shape)
 
+    ds.to_netcdf(args.output_dir + "/" + args.output_name + "_gt.nc")
     data_tmp = data_test.copy()
-    for it in range(nc):
-        data_tmp[idx[it]][mask[it]] = data_mean[mask[it]]
-    ds[args.data_type].values = data_tmp.get().reshape(-1,*shape[1:])
+    for it in range(nchunk):
+        data_tmp[idx[it]][mask[it]] = cp.nan
+    ds[args.data_type].values = data_tmp.get().reshape(-1,*orig_shape[1:])
     ds.to_netcdf(args.output_dir + "/" + args.output_name + "_image.nc")
 
     data_train = cp.vstack((cp.zeros((nt, ns)), data_train))
     print("* Shape of data stack:", data_train.shape)
 
-    if args.optimize_to_ncmax is None:
-        nc_max = args.n_components + 1
-    else:
-        nc_max = args.optimize_to_ncmax
-        data_optim = cp.zeros(shape)
+    ncomp = len(args.n_components)
+    if ncomp != 1:
+        data_optim = cp.zeros(flat_shape)
 
-    data_tmp = cp.zeros(shape)
+    data_tmp = cp.zeros(flat_shape)
     optim_k = None
     min_err = cp.inf
-    max_iter = ( nc_max - args.n_components ) * nc * args.n_iter
+    max_iter = ncomp * nchunk * args.n_iter
     pbar = tqdm(total = max_iter)
-    for k in range(args.n_components, nc_max):
-        for it in range(nc):
+    for k in args.n_components:
+        for it in range(nchunk):
 
             data_train[:nt] = data_test[idx[it]]
             data_train[:nt][mask[it]] = data_mean[mask[it]]
@@ -124,20 +135,21 @@ def climpca():
                 trans = pca.transform(data_train)
                 image_recon = pca.inverse_transform(trans)
                 data_train[:nt][mask[it]] = image_recon[:nt][mask[it]]
-            data_tmp[idx[it]] = data_train[:nt].reshape(-1,*shape[1:])
+            data_tmp[idx[it]] = data_train[:nt]
 
-        if args.optimize_to_ncmax is not None:
+        if ncomp != 1:
             rmse = cp.sqrt(((data_test - data_tmp)**2).mean())
+            print("* RMSE for n_components = {}: {:.6f}".format(k, rmse))
             if rmse < min_err:
                 min_err = rmse.copy()
                 optim_k = k
                 data_optim = data_tmp.copy()
 
-    if args.optimize_to_ncmax is None:
-        ds[args.data_type].values = data_tmp.get()
+    if ncomp == 1:
+        ds[args.data_type].values = data_tmp.reshape(-1,*orig_shape[1:]).get()
     else:
         print("Optimal number of components: ", optim_k)
-        ds[args.data_type].values = data_optim.get()
+        ds[args.data_type].values = data_optim.reshape(-1,*orig_shape[1:]).get()
 
     ds.to_netcdf(args.output_dir + "/" + args.output_name + "_infilled.nc")
 
