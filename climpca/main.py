@@ -151,7 +151,7 @@ def climpca():
     if ncomp == 1:
         ds[args.data_type].values = data_tmp.reshape(-1,*orig_shape[1:]).get()
     else:
-        print("* Optimal number of components: ", optim_k)
+        print("* Optimal number of components: ", args.n_components[optim_k])
         print("* RMSE = {:.6f}".format(rmse[optim_k,1]))
         cp.savetxt(args.output_dir + "/" + args.output_name + "_rmse.nc", rmse)
         ds[args.data_type].values = data_optim.reshape(-1,*orig_shape[1:]).get()
