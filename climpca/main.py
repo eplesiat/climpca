@@ -117,17 +117,20 @@ def climpca():
         data_optim = cp.zeros(flat_shape)
 
     data_tmp = cp.zeros(flat_shape)
+    rmse = cp.zeros((ncomp,2))
     optim_k = None
     min_err = cp.inf
     max_iter = ncomp * nchunk * args.n_iter
     pbar = tqdm(total = max_iter)
-    for k in args.n_components:
+    for k in range(ncomp):
+        n_components = args.n_components[k]
+        pca = PCA(n_components = n_components)
+
         for it in range(nchunk):
 
             data_train[:nt] = data_test[idx[it]]
             data_train[:nt][mask[it]] = data_mean[mask[it]]
 
-            pca = PCA(n_components = k)
             for i in range(args.n_iter):
                 pbar.update(1)
                 pca.fit(data_train)
@@ -138,17 +141,19 @@ def climpca():
             data_tmp[idx[it]] = data_train[:nt]
 
         if ncomp != 1:
-            rmse = cp.sqrt(((data_test - data_tmp)**2).mean())
-            print("* RMSE for n_components = {}: {:.6f}".format(k, rmse))
-            if rmse < min_err:
-                min_err = rmse.copy()
+            rmse[k,0] = k + 1
+            rmse[k,1] = cp.sqrt(((data_test - data_tmp)**2).mean())
+            if rmse[k,1] < min_err:
+                min_err = rmse[k,1].copy()
                 optim_k = k
                 data_optim = data_tmp.copy()
 
     if ncomp == 1:
         ds[args.data_type].values = data_tmp.reshape(-1,*orig_shape[1:]).get()
     else:
-        print("Optimal number of components: ", optim_k)
+        print("* Optimal number of components: ", optim_k)
+        print("* RMSE = {:.6f}".format(rmse[optim_k,1]))
+        cp.savetxt(args.output_dir + "/" + args.output_name + "_rmse.nc", rmse)
         ds[args.data_type].values = data_optim.reshape(-1,*orig_shape[1:]).get()
 
     ds.to_netcdf(args.output_dir + "/" + args.output_name + "_infilled.nc")
